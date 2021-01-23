@@ -1,13 +1,19 @@
 from aiogram import types, Dispatcher
 from aiogram.dispatcher import FSMContext
-from typing import Union
+from typing import Union, Optional
+from inspect import iscoroutine
 
 
 class Button:
-    def __init__(self, text: str, on_click: callable = None, **kwargs):
+    def __init__(self,
+                 text: str, on_click: Optional[callable] = None,
+                 visible: Optional[Union[bool, callable]] = True,
+                 **kwargs
+                 ):
         self.text = text
         self.kwargs = kwargs
         self.on_click = on_click
+        self.visible = visible
         self.registered = False
         if "callback_data" not in self.kwargs:
             self.kwargs["callback_data"] = self.text
@@ -152,19 +158,27 @@ class Window:
                 setattr(cls, name, other)
 
     @classmethod
-    def build_buttons(cls):
+    async def build_buttons(cls):
         buttons = []
         rows = []
         n = 0
         for j in vars(cls):
             data: Button = getattr(cls, j)
             if isinstance(data, Button):
+                if callable(data.visible):
+                    visible = data.visible()
+                elif iscoroutine(data.visible):
+                    visible = await data.visible()
+                else:
+                    visible = data.visible
+                if not visible:
+                    continue
                 n += 1
                 buttons.append(data)
                 if hasattr(data, "__new_line"):
                     rows.append(n)
                     n = 0
-        if cls.schema is not None:
+        if cls.schema:
             schema = cls.schema
         elif rows:
             schema = rows
@@ -272,8 +286,9 @@ class Window:
         elif chat is None or user is None:
             raise Exception("need chat and/or user")
         await dispatcher.storage.set_state(chat=chat, user=user, state=cls.state)
+        keyboard = await cls.build_buttons()
         await dispatcher.bot.send_message(
             chat_id=chat,
             text=cls.text,
-            reply_markup=cls.build_buttons()
+            reply_markup=keyboard
         )

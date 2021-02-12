@@ -1,34 +1,144 @@
 from aiogram import types, Dispatcher
 from aiogram.dispatcher import FSMContext
-from typing import Union, Optional
+from typing import Union, Optional, Callable
 from inspect import iscoroutine
+
+INLINE_BUTTON_KEYS = (
+    "url", "login_url", "callback_data", "switch_inline_query", "switch_inline_query_current_chat", "callback_game",
+    "pay")
+REPLY_BUTTON_KEYS = ("request_contact", "request_location", "request_poll")
+BUTTONS_ARGS = INLINE_BUTTON_KEYS + REPLY_BUTTON_KEYS
+
+
+class ProgressBar:
+    def __init__(self,
+                 text: str,
+                 minimum: int = 0,
+                 maximum: int = 100,
+                 position: int = 0,
+                 background: str = "░",
+                 progress: str = "█",
+                 wight: int = 10,
+                 decimals: int = 1,
+                 imposition: bool = False,
+                 revers: bool = False,
+                 vertical: bool = False
+                 ):
+        self._text = text
+        self.minimum = minimum
+        self.maximum = maximum
+        self.position = position
+        self.background = background
+        self.progress = progress
+        self.wight = wight
+        self.decimals = decimals
+        self.imposition = imposition
+        self.revers = revers
+        self.vertical = vertical
+        if self.imposition:
+            if len(self.progress) != len(self.background):
+                raise Exception("")  # todo
+            self.wight = len(self.progress)
+
+    @property
+    def position(self):
+        return self._position
+
+    @position.setter
+    def position(self, pos: int):
+        if pos > self.maximum:
+            pos = self.maximum
+        elif pos < self.minimum:
+            pos = self.minimum
+        self._position = pos
+
+    @property
+    def text(self) -> str:
+        text = self._text
+        if "{progress}" in text:
+            fill = int(self.wight * self.position // self.maximum)
+            if self.imposition:
+                if self.position == 0:
+                    bar = self.background
+                else:
+                    bar = self.progress[:fill] + self.background[fill:]
+            else:
+                bar = self.progress * fill + self.background * (self.wight - fill)
+            if self.revers:
+                bar = bar[::-1]
+            if self.vertical:
+                bar = "\n".join(list(bar))
+            text = text.replace("{progress}", bar)
+        if "{%}" in text:
+            percent = ("{0:." + str(self.decimals) + "f}").format(100 * (self.position / float(self.maximum)))
+            text = text.replace("{%}", percent)
+        return text
+
+    def __str__(self):
+        return self.text
+
+    def __call__(self, *args, **kwargs):
+        return self.text
+
+    @text.setter
+    def text(self, text: str):
+        self._text = text
 
 
 class Button:
     def __init__(self,
-                 text: str, on_click: Optional[callable] = None,
-                 visible: Optional[Union[bool, callable]] = True,
-                 **kwargs
+                 text: str, callback_data: types.base.String = None,
+                 on_click: Optional[Callable] = None,
+                 visible: Optional[Union[bool, Callable]] = True,
+                 url: types.base.String = None,
+                 login_url: types.login_url.LoginUrl = None,
+                 switch_inline_query: types.base.String = None,
+                 switch_inline_query_current_chat: types.base.String = None,
+                 callback_game: types.callback_game.CallbackGame = None,
+                 pay: types.base.Boolean = None,
+                 request_contact: types.base.Boolean = None,
+                 request_location: types.base.Boolean = None,
+                 request_poll: types.reply_keyboard.KeyboardButtonPollType = None,
+                 # **kwargs  # todo delete
                  ):
         self.text = text
-        self.kwargs = kwargs
+        #  self.kwargs = kwargs  # todo delete
+        self.kwargs = {key: value for key, value in locals().items() if value is not None and key in BUTTONS_ARGS}
         self.on_click = on_click
         self.visible = visible
-        self.registered = False
-        if "callback_data" not in self.kwargs:
-            self.kwargs["callback_data"] = self.text
-        self.button = types.InlineKeyboardButton(text=text, **self.kwargs)
+        self.registered = False  # todo delete
+        self.is_inline()
+        # if "callback_data" not in self.kwargs:
+        #    self.kwargs["callback_data"] = self.text.__str__()   # todo Deprecated
+
+    @property
+    def button(self):
+        if self.is_inline():
+            return types.InlineKeyboardButton(text=self.text.__str__(), **self.kwargs)
+        else:
+            return types.KeyboardButton(text=self.text.__str__(), **self.kwargs)
 
     @property
     def row(self):
         setattr(self, "__new_line", None)
         return self
 
-    def __call__(self, call: types.CallbackQuery):
-        return call.data == self.kwargs.get("callback_data")
+    def is_inline(self):
+        if len(self.kwargs) > 1:
+            raise Exception("")  # todo
+        return any(key in INLINE_BUTTON_KEYS for key, val in self.kwargs.items())
 
-    def __eq__(self, other):
-        return other == self.kwargs.get("callback_data")
+    def __call__(self, update: Union[types.CallbackQuery, types.Message]):
+        if self.is_inline():
+            return update.data == self.kwargs.get("callback_data")
+        else:
+            return update.text == self.text
+
+    def __eq__(self, other: Union[types.CallbackQuery, types.Message]):
+        if self.is_inline():
+            return other == self.kwargs.get("callback_data")
+        else:
+            return other == self.text
 
 
 class Input:
@@ -184,7 +294,12 @@ class Window:
             schema = rows
         else:
             schema = (cls.row_width,)
-        keyboard = types.InlineKeyboardMarkup()
+        if not buttons:
+            return None
+        if buttons[0].is_inline():
+            keyboard = types.InlineKeyboardMarkup()
+        else:
+            keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
         schema_line = 0
         row = []
         for i in buttons:
@@ -241,14 +356,21 @@ class Window:
         if dispatcher is None:
             raise Exception("dispatcher not set")
         for i in vars(cls):
-            data: Button = getattr(cls, i)
+            data: Union[Button, Input] = getattr(cls, i)
             if isinstance(data, Button) and not data.registered:
                 if cls.default_save:
-                    dispatcher.register_callback_query_handler(
-                        callback=(cls.default_callback_save if data.on_click is None else data.on_click),
-                        text=data.kwargs.get("callback_data"),
-                        state=cls.state
-                    )
+                    if data.is_inline():
+                        dispatcher.register_callback_query_handler(
+                            callback=(cls.default_callback_save if data.on_click is None else data.on_click),
+                            text=data.kwargs.get("callback_data"),
+                            state=cls.state
+                        )
+                    else:
+                        dispatcher.register_message_handler(
+                            callback=(cls.default_text_save if data.on_click is None else data.on_click),
+                            text=data.text,
+                            state=cls.state
+                        )
             elif isinstance(data, Input) and not data.registered:
                 dispatcher.register_message_handler(
                     (cls.default_text_save if data.on_enter is None else data.on_enter),
@@ -289,6 +411,6 @@ class Window:
         keyboard = await cls.build_buttons()
         await dispatcher.bot.send_message(
             chat_id=chat,
-            text=cls.text,
+            text=cls.text(chat=chat, user=user, dispatcher=dispatcher) if callable(cls.text) else cls.text,
             reply_markup=keyboard
         )
